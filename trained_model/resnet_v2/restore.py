@@ -29,9 +29,12 @@ def showtensorname(ckptpath):
     checkpoint_path = ckptpath
     reader = pywrap_tensorflow.NewCheckpointReader(checkpoint_path)
     var_to_shape_map = reader.get_variable_to_shape_map()
+    """
     for key in var_to_shape_map:
         print("tensor_name: ", key)
-        print(reader.get_tensor(key)) # Remove this is you want to print only variable names
+        print(reader.get_tensor(key)) # Remove this is you want to print only variable names    
+    """
+    return var_to_shape_map, reader
 
 with tf.Graph().as_default() as g:
     input_node = tf.placeholder(tf.float32, shape=(None, 224, 224, 3), name='input_node')
@@ -39,10 +42,12 @@ with tf.Graph().as_default() as g:
     with slim.arg_scope(resnet_utils.resnet_arg_scope()):
         net, endpoints=resnet_v2.resnet_v2_50(input_node)
 
+
     #trainable = tf.trainable_variables()
     #variables_to_restore = [i for i in trainable if 'block' in i.name]
     #restorer = tf.train.Saver(variables_to_restore)
-    restorer = tf.train.Saver([i for i in tf.trainable_variables() if 'block' in i.name])
+    #restorer = tf.train.Saver([i for i in tf.trainable_variables() if 'block' in i.name])
+    restorer = tf.train.Saver([i for i in tf.trainable_variables()])
     """
     #glob_var = tf.global_variables()
     #restorer = tf.train.Saver(glob_var)
@@ -52,7 +57,8 @@ with tf.Graph().as_default() as g:
 with tf.Session(graph=g) as sess:
     sess.run(tf.global_variables_initializer())
     restorer.restore(sess, model_path)
-    print(g.get_tensor_by_name('resnet_v2_50/postnorm/beta:0'))
+    a=sess.run(g.get_tensor_by_name('resnet_v2_50/conv1/weights:0'))
+    #print(g.get_tensor_by_name('resnet_v2_50/postnorm/beta:0'))
     #var_list = tf.trainable_variables()
     #constant_graph = graph_util.convert_variables_to_constants(sess, sess.graph_def, output_node_names=[var_list[i].name for i in range(len(var_list))])
     #tf.train.write_graph(constant_graph, './output', 'resnet_v2_50.pb', as_text=False)
@@ -62,6 +68,10 @@ with tf.Session(graph=g) as sess:
 
 gname = test_graph_name(model_path='frozen_model.pb')
 
+ckpt, reader = showtensorname(model_path)
+
+b=reader.get_tensor('resnet_v2_50/conv1/weights')
+print(a==b)
 
 def main():
 

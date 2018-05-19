@@ -25,7 +25,7 @@ tf.app.flags.DEFINE_string('summaries_dir', '../retrain_logs', "log")
 tf.app.flags.DEFINE_integer('intermediate_store_frequency', 0, "descript3")
 tf.app.flags.DEFINE_integer('testing_percentage', 20, "descript3")
 tf.app.flags.DEFINE_integer('validation_percentage', 20, "descript3")
-tf.app.flags.DEFINE_string('image_dir', '/home/zhongyi/PycharmProjects/GraduationThesis/generated_images/', "image directionary")
+tf.app.flags.DEFINE_string('image_dir', '/home/sjtu/Desktop/xinhe/GradThesis/generated_images', "image directionary")
 tf.app.flags.DEFINE_bool('flip_left_right', False, "image directionary")
 tf.app.flags.DEFINE_integer('random_crop', 0, "image directionary")
 tf.app.flags.DEFINE_integer('random_scale', 0, "image directionary")
@@ -33,14 +33,54 @@ tf.app.flags.DEFINE_integer('random_brightness', 0, "image directionary")
 tf.app.flags.DEFINE_string('bottleneck_dir', '/tmp/bottleneck', 'tmp')
 tf.app.flags.DEFINE_string('model_dir', '../trained_model/resnet_v2', "image directionary")
 tf.app.flags.DEFINE_string('final_tensor_name', 'final_result', "image directionary")
+
 tf.app.flags.DEFINE_float('learning_rate', 0.01, "image directionary")
-tf.app.flags.DEFINE_integer('how_many_training_steps', 4000, 'train step')
-tf.app.flags.DEFINE_integer('train_batch_size', 100, 'train batch size')
+tf.app.flags.DEFINE_integer('how_many_training_steps', 1000, 'train step')
+tf.app.flags.DEFINE_integer('train_batch_size', 500, 'train batch size')
 tf.app.flags.DEFINE_integer('validation_batch_size', 100, 'train batch size')
 tf.app.flags.DEFINE_integer('test_batch_size', -1, 'train batch size')
 tf.app.flags.DEFINE_integer('eval_step_interval', 10, 'train batch size')
+tf.app.flags.DEFINE_string('output_graph', '../trained_model/trained_model.pb', "image directionary")
+tf.app.flags.DEFINE_bool('print_misclassified_test_images', False, "image directionary")
+tf.app.flags.DEFINE_string('output_labels', '../trained_model/output_labels_new.txt', "image directionary")
+tf.app.flags.DEFINE_string('saved_model_dir', '../trained_model/export_graph/','Where to save the exported graph.')
 FLAGS = tf.app.flags.FLAGS
 MAX_NUM_IMAGES_PER_CLASS = 2 ** 27 - 1  # ~134M
+
+CHECKPOINT_NAME = '/tmp/_retrain_checkpoint'
+def build_eval_session(model_info, class_count):
+    """Builds an restored eval session without train operations for exporting.
+
+    Args:
+      model_info: Model info dictionary from create_model_info()
+      class_count: Number of classes
+
+    Returns:
+      Eval session containing the restored eval graph.
+      The bottleneck input, ground truth, eval step, and prediction tensors.
+    """
+    # If quantized, we need to create the correct eval graph for exporting.
+    eval_graph, bottleneck_tensor, _ = create_model_graph(model_info)
+
+    eval_sess = tf.Session(graph=eval_graph)
+    with eval_graph.as_default():
+        # Add the new layer for exporting.
+        (_, _, bottleneck_input,
+         ground_truth_input, final_tensor) = add_final_retrain_ops(
+             class_count, FLAGS.final_tensor_name, bottleneck_tensor,
+             model_info['bottleneck_tensor_size'], model_info['quantize_layer'],
+             False)
+
+        # Now we need to restore the values from the training graph to the eval
+        # graph.
+        tf.train.Saver().restore(eval_sess, CHECKPOINT_NAME)
+
+        evaluation_step, prediction = add_evaluation_step(final_tensor,
+                                                          ground_truth_input)
+
+    return (eval_sess, bottleneck_input, ground_truth_input, evaluation_step,
+            prediction)
+
 
 
 def should_distort_images(flip_left_right, random_crop, random_scale,
@@ -59,6 +99,103 @@ def should_distort_images(flip_left_right, random_crop, random_scale,
     """
     return (flip_left_right or (random_crop != 0) or (random_scale != 0) or
             (random_brightness != 0))
+
+
+def export_model(model_info, class_count, saved_model_dir):
+    """Exports model for serving.
+
+    Args:
+      model_info: The modelinfo for the current model.
+      class_count: The number of classes.
+      saved_model_dir: Directory in which to save exported model and variables.
+    """
+    # The SavedModel should hold the eval graph.
+    sess, _, _, _, _ = build_eval_session(model_info, class_count)
+    graph = sess.graph
+    with graph.as_default():
+        input_tensor = model_info['resized_input_tensor_name']
+        in_image = sess.graph.get_tensor_by_name(input_tensor)
+        inputs = {'image': tf.saved_model.utils.build_tensor_info(in_image)}
+
+        out_classes = sess.graph.get_tensor_by_name('final_result:0')
+        outputs = {
+            'prediction': tf.saved_model.utils.build_tensor_info(out_classes)
+        }
+
+        signature = tf.saved_model.signature_def_utils.build_signature_def(
+            inputs=inputs,
+            outputs=outputs,
+            method_name=tf.saved_model.signature_constants.PREDICT_METHOD_NAME)
+
+        legacy_init_op = tf.group(tf.tables_initializer(), name='legacy_init_op')
+
+        # Save out the SavedModel.
+        builder = tf.saved_model.builder.SavedModelBuilder(saved_model_dir)
+        builder.add_meta_graph_and_variables(
+            sess, [tf.saved_model.tag_constants.SERVING],
+            signature_def_map={
+                tf.saved_model.signature_constants.
+                DEFAULT_SERVING_SIGNATURE_DEF_KEY:
+                    signature
+            },
+            legacy_init_op=legacy_init_op)
+        builder.save()
+
+
+
+def save_graph_to_file(graph, graph_file_name, model_info, class_count):
+    """Saves an graph to file, creating a valid quantized one if necessary."""
+    sess, _, _, _, _ = build_eval_session(model_info, class_count)
+    graph = sess.graph
+
+    output_graph_def = graph_util.convert_variables_to_constants(
+        sess, graph.as_graph_def(), [FLAGS.final_tensor_name])
+
+    with gfile.FastGFile(graph_file_name, 'wb') as f:
+        f.write(output_graph_def.SerializeToString())
+
+
+
+
+def run_final_eval(sess, model_info, class_count, image_lists, jpeg_data_tensor,
+                   decoded_image_tensor, resized_image_tensor,
+                   bottleneck_tensor):
+    """Runs a final evaluation on an eval graph using the test data set.
+
+    Args:
+      sess: Session for the train graph.
+      model_info: Model info dictionary from create_model_info()
+      class_count: Number of classes
+      image_lists: Dictionary of training images for each label.
+      jpeg_data_tensor: The layer to feed jpeg image data into.
+      decoded_image_tensor: The output of decoding and resizing the image.
+      resized_image_tensor: The input node of the recognition graph.
+      bottleneck_tensor: The bottleneck output layer of the CNN graph.
+    """
+    (sess, bottleneck_input, ground_truth_input, evaluation_step,
+     prediction) = build_eval_session(model_info, class_count)
+
+    test_bottlenecks, test_ground_truth, test_filenames = (
+        get_random_cached_bottlenecks(sess, image_lists, FLAGS.test_batch_size,
+                                      'testing', FLAGS.bottleneck_dir,
+                                      FLAGS.image_dir, jpeg_data_tensor,
+                                      decoded_image_tensor, resized_image_tensor,
+                                      bottleneck_tensor, FLAGS.architecture))
+    test_accuracy, predictions = sess.run(
+        [evaluation_step, prediction],
+        feed_dict={
+            bottleneck_input: test_bottlenecks,
+            ground_truth_input: test_ground_truth
+        })
+    tf.logging.info('Final test accuracy = %.1f%% (N=%d)' %
+                    (test_accuracy * 100, len(test_bottlenecks)))
+
+    if FLAGS.print_misclassified_test_images:
+        tf.logging.info('=== MISCLASSIFIED TEST IMAGES ===')
+        for i, test_filename in enumerate(test_filenames):
+            if predictions[i] != test_ground_truth[i]:
+                tf.logging.info('%70s  %s' % (test_filename,
+                                              list(image_lists.keys())[predictions[i]]))
 
 
 def get_random_cached_bottlenecks(sess, image_lists, how_many, category,
@@ -1049,6 +1186,7 @@ def main(_):
                                    class_count)
 
         # After training is complete, force one last save of the train checkpoint.
+
         train_saver.save(sess, CHECKPOINT_NAME)
 
         # We've completed all our training, so run a final test evaluation on
