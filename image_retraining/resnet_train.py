@@ -10,7 +10,7 @@ import random
 import re
 import sys
 import tarfile
-
+import shutil
 import numpy as np
 from six.moves import urllib
 import tensorflow as tf
@@ -26,6 +26,9 @@ tf.app.flags.DEFINE_integer('intermediate_store_frequency', 0, "descript3")
 tf.app.flags.DEFINE_integer('testing_percentage', 20, "descript3")
 tf.app.flags.DEFINE_integer('validation_percentage', 20, "descript3")
 tf.app.flags.DEFINE_string('image_dir', '/home/sjtu/Desktop/xinhe/GradThesis/generated_images', "image directionary")
+#tf.app.flags.DEFINE_string('image_dir', '/home/zhongyi/Downloads/train_data/', "image directionary")
+tf.app.flags.DEFINE_string('image_dir', '/home/zhongyi/Downloads/GraduationThesis/', "image directionary")
+tf.app.flags.DEFINE_string('image_dir_test', '/home/zhongyi/Downloads/GraduationThesisData/test/', "image directionary")
 tf.app.flags.DEFINE_bool('flip_left_right', False, "image directionary")
 tf.app.flags.DEFINE_integer('random_crop', 0, "image directionary")
 tf.app.flags.DEFINE_integer('random_scale', 0, "image directionary")
@@ -35,13 +38,13 @@ tf.app.flags.DEFINE_string('model_dir', '../trained_model/resnet_v2', "image dir
 tf.app.flags.DEFINE_string('final_tensor_name', 'final_result', "image directionary")
 
 tf.app.flags.DEFINE_float('learning_rate', 0.01, "image directionary")
-tf.app.flags.DEFINE_integer('how_many_training_steps', 1000, 'train step')
-tf.app.flags.DEFINE_integer('train_batch_size', 500, 'train batch size')
+tf.app.flags.DEFINE_integer('how_many_training_steps', 4000, 'train step')
+tf.app.flags.DEFINE_integer('train_batch_size', 200, 'train batch size')
 tf.app.flags.DEFINE_integer('validation_batch_size', 100, 'train batch size')
 tf.app.flags.DEFINE_integer('test_batch_size', -1, 'train batch size')
 tf.app.flags.DEFINE_integer('eval_step_interval', 10, 'train batch size')
 tf.app.flags.DEFINE_string('output_graph', '../trained_model/trained_model.pb', "image directionary")
-tf.app.flags.DEFINE_bool('print_misclassified_test_images', False, "image directionary")
+tf.app.flags.DEFINE_bool('print_misclassified_test_images', True, "image directionary")
 tf.app.flags.DEFINE_string('output_labels', '../trained_model/output_labels_new.txt', "image directionary")
 tf.app.flags.DEFINE_string('saved_model_dir', '../trained_model/export_graph/','Where to save the exported graph.')
 FLAGS = tf.app.flags.FLAGS
@@ -130,6 +133,9 @@ def export_model(model_info, class_count, saved_model_dir):
         legacy_init_op = tf.group(tf.tables_initializer(), name='legacy_init_op')
 
         # Save out the SavedModel.
+        if os.path.exists(saved_model_dir):
+            shutil.rmtree(saved_model_dir)
+            print("last model deleted!")
         builder = tf.saved_model.builder.SavedModelBuilder(saved_model_dir)
         builder.add_meta_graph_and_variables(
             sess, [tf.saved_model.tag_constants.SERVING],
@@ -191,12 +197,16 @@ def run_final_eval(sess, model_info, class_count, image_lists, jpeg_data_tensor,
                     (test_accuracy * 100, len(test_bottlenecks)))
 
     if FLAGS.print_misclassified_test_images:
+
+        counting_array = np.zeros([class_count, class_count]) # col: ground true row: prediction
         tf.logging.info('=== MISCLASSIFIED TEST IMAGES ===')
         for i, test_filename in enumerate(test_filenames):
+            counting_array[test_ground_truth[i]][predictions[i]] +=1
             if predictions[i] != test_ground_truth[i]:
                 tf.logging.info('%70s  %s' % (test_filename,
                                               list(image_lists.keys())[predictions[i]]))
-
+                print(predictions[i])
+        print(counting_array)
 
 def get_random_cached_bottlenecks(sess, image_lists, how_many, category,
                                   bottleneck_dir, image_dir, jpeg_data_tensor,
@@ -757,11 +767,11 @@ def create_model_info(architecture):
         # pylint: enable=line-too-long
         bottleneck_tensor_name = 'resnet_v2_50/pool5:0' ###
         bottleneck_tensor_size = 2048
-        input_width = 224
-        input_height = 224
+        input_width = 299
+        input_height = 299
         input_depth = 3
         resized_input_tensor_name = 'input_node:0'
-        model_file_name = 'frozen_model.pb'
+        model_file_name = 'resnet_v2_frozen_model.pb'
         input_mean = 128
         input_std = 128
 
@@ -1188,7 +1198,7 @@ def main(_):
         # After training is complete, force one last save of the train checkpoint.
 
         train_saver.save(sess, CHECKPOINT_NAME)
-
+        #image_lists=create_image_lists(FLAGS.image_dir, 100,0)
         # We've completed all our training, so run a final test evaluation on
         # some new images we haven't used before.
         run_final_eval(sess, model_info, class_count, image_lists, jpeg_data_tensor,
